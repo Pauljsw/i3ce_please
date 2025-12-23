@@ -1,0 +1,128 @@
+import torch
+import argparse
+import subprocess
+import time
+import os
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+from transformers import TextStreamer
+from llava.utils import disable_torch_init
+from llava.model.builder import load_pretrained_model
+from llava.conversation import conv_templates, SeparatorStyle
+from llava.constants import POINT_TOKEN_INDEX, DEFAULT_POINT_TOKEN, DEFAULT_PT_START_TOKEN, DEFAULT_PT_END_TOKEN
+from llava.mm_utils import load_pts, process_pts, rotation, tokenizer_point_token, get_model_name_from_path, \
+    KeywordsStoppingCriteria
+
+def get_rag_prompt(query: str, rag_python_path="/home/aim/anaconda3/envs/rag_faiss/bin/python", script_name="rag_fetcher.py"):
+    script_path = os.path.join(SCRIPT_DIR, script_name)
+    subprocess.run([rag_python_path, script_path, "--query", query])
+
+    time.sleep(1)
+
+    output_path = os.path.join(SCRIPT_DIR, "rag_output.txt")
+
+    if not os.path.exists(output_path):
+        raise FileNotFoundError("❌ rag_output.txt not found! rag_fetcher.py failed to execute properly.")
+    
+    with open(output_path, "r") as f:
+        return f.read()
+
+
+def main(args):
+    disable_torch_init()
+
+    model_name = get_model_name_from_path(args.model_path)
+    tokenizer, model, context_len = load_pretrained_model(
+        args.model_path, args.model_base, model_name, args.load_8bit,
+        args.load_4bit, device=args.device)
+
+    conv_mode = "llava_sw"
+    if args.conv_mode is not None and conv_mode != args.conv_mode:
+        print(f"[WARNING] auto inferred conv mode is {conv_mode}, using {args.conv_mode}")
+    else:
+        args.conv_mode = conv_mode
+
+    conv = conv_templates[args.conv_mode].copy()
+    roles = conv.roles
+
+    if args.pts_file is not None:
+        pts = load_pts(args.pts_file)
+        if args.objaverse:
+            pts[:, :3] = rotation(pts[:, :3], [0, 0, -90])
+        pts_tensor = process_pts(pts, model.config).unsqueeze(0)
+        model_device = next(model.parameters()).device
+        pts_tensor = pts_tensor.to(model_device, dtype=torch.float16)
+    else:
+        pts = None
+        pts_tensor = None
+
+    while True:
+        try:
+            inp = input(f"{roles[0]}: ")
+        except EOFError:
+            inp = ""
+        if not inp:
+            print("exit...")
+            break
+
+
+        # 🔍 RAG 프롬프트 호출
+        rag_augmented_input = get_rag_prompt(inp)
+
+        print(f"{roles[1]}: ", end="")
+
+        if pts is not None:
+            if model.config.mm_use_pt_start_end:
+                rag_augmented_input = DEFAULT_PT_START_TOKEN + DEFAULT_POINT_TOKEN + DEFAULT_PT_END_TOKEN + '\n' + rag_augmented_input
+            else:
+                rag_augmented_input = DEFAULT_POINT_TOKEN + '\n' + rag_augmented_input
+            conv.append_message(conv.roles[0], rag_augmented_input)
+            pts = None
+        else:
+            conv.append_message(conv.roles[0], rag_augmented_input)
+
+        conv.append_message(conv.roles[1], None)
+        prompt = conv.get_prompt()
+
+        input_ids = tokenizer_point_token(prompt, tokenizer, POINT_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
+        token_length = input_ids.shape[1]
+        print(f"[DEBUG] 💬 Full input token count (incl. point token): {token_length}")
+
+        stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
+        keywords = [stop_str]
+        stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
+        streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+
+        with torch.inference_mode():
+            output_ids = model.generate(
+                input_ids,
+                points=pts_tensor,
+                do_sample=True,
+                temperature=args.temperature,
+                max_new_tokens=args.max_new_tokens,
+                streamer=streamer,
+                use_cache=True,
+                stopping_criteria=[stopping_criteria])
+
+        outputs = tokenizer.decode(output_ids[0, input_ids.shape[1]:]).strip()
+        conv.messages[-1][-1] = outputs
+
+        if args.debug:
+            print("\n", {"prompt": prompt, "outputs": outputs}, "\n")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model-path", type=str, required=True)
+    parser.add_argument("--model-base", type=str, default=None)
+    parser.add_argument("--pts-file", type=str, required=False)
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--conv-mode", type=str, default=None)
+    parser.add_argument("--temperature", type=float, default=0.5)
+    parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--load-8bit", action="store_true")
+    parser.add_argument("--load-4bit", action="store_true")
+    parser.add_argument("--objaverse", action="store_true")
+    parser.add_argument("--debug", action="store_true")
+
+    args = parser.parse_args()
+    main(args)
