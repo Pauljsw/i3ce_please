@@ -92,7 +92,7 @@ def generate_missing_dataset(
     os.makedirs(pcs_dir, exist_ok=True)
 
     scene_records: List[Dict[str, Any]] = []
-    generator = EnhancedScaffoldGeneratorFinal(random_seed=None)
+    generator = EnhancedScaffoldGeneratorFinal(random_seed=42)  # Fixed seed for reproducibility
 
     print(f"🏗️ Generating {num_scenes} scaffold scenes with FIXED bbox normalization...")
     print(f"📊 Missing quota: {generator.missing_quota} components max per scene")
@@ -104,6 +104,22 @@ def generate_missing_dataset(
         'total_components': 0,
         'components_with_valid_bbox': 0,
         'components_with_invalid_bbox': 0
+    }
+
+    # 🆕 Missing component statistics
+    missing_type_stats = {
+        'perfect_scaffolds': 0,  # No missing components
+        'vertical_only': 0,      # Only vertical posts missing
+        'horizontal_only': 0,    # Only horizontal beams missing
+        'platform_only': 0,      # Only platforms missing
+        'vertical_horizontal': 0,  # V + H missing
+        'vertical_platform': 0,    # V + P missing
+        'horizontal_platform': 0,  # H + P missing
+        'all_three': 0,            # V + H + P missing
+        'total_missing_vertical': 0,
+        'total_missing_horizontal': 0,
+        'total_missing_platform': 0,
+        'scenes_with_any_missing': 0
     }
 
     # Generate all scenes first
@@ -150,7 +166,41 @@ def generate_missing_dataset(
         
         print(f"✅ {scene_id}: {len(missing_components)} missing total "
               f"(V:{missing_by_type['vertical']}, H:{missing_by_type['horizontal']}, P:{missing_by_type['platform']})")
-        
+
+        # 🆕 Update missing type statistics
+        v_count = missing_by_type['vertical']
+        h_count = missing_by_type['horizontal']
+        p_count = missing_by_type['platform']
+
+        missing_type_stats['total_missing_vertical'] += v_count
+        missing_type_stats['total_missing_horizontal'] += h_count
+        missing_type_stats['total_missing_platform'] += p_count
+
+        if len(missing_components) == 0:
+            missing_type_stats['perfect_scaffolds'] += 1
+        else:
+            missing_type_stats['scenes_with_any_missing'] += 1
+
+            # Classify by missing pattern
+            has_v = v_count > 0
+            has_h = h_count > 0
+            has_p = p_count > 0
+
+            if has_v and has_h and has_p:
+                missing_type_stats['all_three'] += 1
+            elif has_v and has_h:
+                missing_type_stats['vertical_horizontal'] += 1
+            elif has_v and has_p:
+                missing_type_stats['vertical_platform'] += 1
+            elif has_h and has_p:
+                missing_type_stats['horizontal_platform'] += 1
+            elif has_v:
+                missing_type_stats['vertical_only'] += 1
+            elif has_h:
+                missing_type_stats['horizontal_only'] += 1
+            elif has_p:
+                missing_type_stats['platform_only'] += 1
+
         # Store annotations and components for later splitting
         scene_records.append({
             'scene_id': scene_id,
@@ -241,17 +291,20 @@ def generate_missing_dataset(
             if not convs or len(convs) < 2:
                 continue
                 
-            # Extract question text (remove <point> token)
+            # Extract question text (REMOVE <point> token - inference code adds it automatically)
             question_text = convs[0]['value'].replace('<point>\n', '').strip()
+            # Extract full answer text (Template-Guided format with Expected vs Actual)
+            answer_text = convs[1]['value']
+
             eval_questions.append({
                 'question_id': ann['id'],
                 'point': ann['point'],
                 'text': question_text,
                 'category': 'scaffold',
             })
-            
+
             # Determine label and bounding boxes
-            label = 'No'  # Default
+            label = 'No'  # Default (simple Yes/No for backward compatibility)
             bboxes: List[List[List[float]]] = []
             
             # Determine answer based on task type
@@ -395,7 +448,8 @@ def generate_missing_dataset(
             eval_gt.append({
                 'question_id': ann['id'],
                 'point': ann['point'],
-                'text': label,
+                'text': answer_text,  # Full answer with Expected vs Actual (Idea 1)
+                'label': label,  # Simple Yes/No for backward compatibility
                 'bboxes': bboxes,
                 'category': 'scaffold',
             })
@@ -430,6 +484,27 @@ def generate_missing_dataset(
     with open(gt_path, 'w', encoding='utf-8') as f:
         for g in eval_gt:
             f.write(json.dumps(g) + '\n')
+
+    # 🆕 Print missing component statistics
+    print(f"\n📊 Missing Component Statistics:")
+    print(f"  ✅ Perfect scaffolds (no missing): {missing_type_stats['perfect_scaffolds']}")
+    print(f"  ⚠️ Scaffolds with missing components: {missing_type_stats['scenes_with_any_missing']}")
+    print(f"\n  📌 Missing patterns:")
+    print(f"     Vertical only: {missing_type_stats['vertical_only']}")
+    print(f"     Horizontal only: {missing_type_stats['horizontal_only']}")
+    print(f"     Platform only: {missing_type_stats['platform_only']}")
+    print(f"     Vertical + Horizontal: {missing_type_stats['vertical_horizontal']}")
+    print(f"     Vertical + Platform: {missing_type_stats['vertical_platform']}")
+    print(f"     Horizontal + Platform: {missing_type_stats['horizontal_platform']}")
+    print(f"     All three types: {missing_type_stats['all_three']}")
+    print(f"\n  📊 Total missing components:")
+    print(f"     Vertical posts: {missing_type_stats['total_missing_vertical']}")
+    print(f"     Horizontal beams: {missing_type_stats['total_missing_horizontal']}")
+    print(f"     Platforms: {missing_type_stats['total_missing_platform']}")
+    total_missing = (missing_type_stats['total_missing_vertical'] +
+                     missing_type_stats['total_missing_horizontal'] +
+                     missing_type_stats['total_missing_platform'])
+    print(f"     TOTAL: {total_missing}")
 
     # Print statistics
     print(f"\n📊 Dataset Statistics:")
@@ -469,11 +544,49 @@ def generate_missing_dataset(
     for task_type, count in sorted(task_type_counts.items()):
         print(f"  {task_type}: {count}")
 
+    # 🆕 Save statistics to JSON file
+    stats_path = os.path.join(output_dir, 'dataset_statistics.json')
+    statistics_report = {
+        'generation_info': {
+            'total_scenes': len(scene_records),
+            'train_scenes': len(train_records),
+            'val_scenes': len(val_records),
+            'sft_examples': len(sft_entries),
+            'eval_questions': len(eval_questions),
+            'random_seed': 42
+        },
+        'missing_components': {
+            'perfect_scaffolds': missing_type_stats['perfect_scaffolds'],
+            'scaffolds_with_missing': missing_type_stats['scenes_with_any_missing'],
+            'missing_patterns': {
+                'vertical_only': missing_type_stats['vertical_only'],
+                'horizontal_only': missing_type_stats['horizontal_only'],
+                'platform_only': missing_type_stats['platform_only'],
+                'vertical_horizontal': missing_type_stats['vertical_horizontal'],
+                'vertical_platform': missing_type_stats['vertical_platform'],
+                'horizontal_platform': missing_type_stats['horizontal_platform'],
+                'all_three_types': missing_type_stats['all_three']
+            },
+            'total_counts': {
+                'vertical_posts': missing_type_stats['total_missing_vertical'],
+                'horizontal_beams': missing_type_stats['total_missing_horizontal'],
+                'platforms': missing_type_stats['total_missing_platform'],
+                'total': total_missing
+            }
+        },
+        'bbox_validation': bbox_validation_stats,
+        'question_types': task_type_counts
+    }
+
+    with open(stats_path, 'w', encoding='utf-8') as f:
+        json.dump(statistics_report, f, indent=2)
+
     print(f"\n💾 Files saved:")
     print(f"  📁 Point clouds: {pcs_dir}")
     print(f"  📝 Training SFT: {sft_path}")
     print(f"  ❓ Eval questions: {q_path}")
     print(f"  ✅ Ground truth: {gt_path}")
+    print(f"  📊 Statistics: {stats_path}")
 
     print(f"\n🎯 Key improvements applied (bbox fixed version):")
     print(f"✅ Fixed bbox normalization (-1~1 range GUARANTEED)")

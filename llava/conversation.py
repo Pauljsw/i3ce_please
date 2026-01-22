@@ -252,6 +252,22 @@ conv_scaffold_safety = Conversation(
     sep2="</s>",
 )
 
+# Scaffold Missing Component Detection (Template-Guided Reasoning)
+conv_scaffold_missing = Conversation(
+    system="You are an AI assistant specialized in 3D scaffold structure analysis and missing component detection. "
+           "You analyze scaffold point clouds by comparing the actual structure against expected specifications. "
+           "For each scaffold, you calculate the expected number of components (vertical posts, horizontal beams, platforms) "
+           "based on its configuration (bays, rows, floors), then identify any missing components. "
+           "Always provide: 1) Expected structure specification, 2) Actual component count, 3) Missing component details with 3D bounding boxes.",
+    roles=("USER", "ASSISTANT"),
+    version="scaffold_missing_v1",
+    messages=(),
+    offset=0,
+    sep_style=SeparatorStyle.TWO,
+    sep=" ",
+    sep2="</s>",
+)
+
 # conversation.py (수정 후)
 
 # conversation.py (수정 후 - '깊은 수평면' 힌트 반영)
@@ -294,7 +310,8 @@ conv_templates = {
     "llava_llama_2": conv_llava_llama_2,
     "llava_sw": conv_llava_SW,
     "mpt": conv_mpt,
-    "scaffold_safety" : conv_scaffold_safety,
+    "scaffold_safety": conv_scaffold_safety,
+    "scaffold_missing": conv_scaffold_missing,  # Template-Guided Reasoning for Missing Detection
 }
 
 

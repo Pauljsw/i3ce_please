@@ -1,0 +1,46 @@
+{
+  "generation_info": {
+    "total_scenes": 3000,
+    "train_scenes": 2400,
+    "val_scenes": 600,
+    "sft_examples": 24596,
+    "eval_questions": 6077,
+    "random_seed": 42
+  },
+  "missing_components": {
+    "perfect_scaffolds": 1184,
+    "scaffolds_with_missing": 1816,
+    "missing_patterns": {
+      "vertical_only": 0,
+      "horizontal_only": 512,
+      "platform_only": 0,
+      "vertical_horizontal": 191,
+      "vertical_platform": 0,
+      "horizontal_platform": 105,
+      "all_three_types": 1008
+    },
+    "total_counts": {
+      "vertical_posts": 1199,
+      "horizontal_beams": 3524,
+      "platforms": 1113,
+      "total": 5836
+    }
+  },
+  "bbox_validation": {
+    "total_scenes": 3000,
+    "scenes_with_bbox_errors": 0,
+    "total_components": 232608,
+    "components_with_valid_bbox": 232608,
+    "components_with_invalid_bbox": 0
+  },
+  "question_types": {
+    "summary": 1458,
+    "floor": 2771,
+    "bay": 2127,
+    "specific": 3876,
+    "horizontal": 4284,
+    "positive": 7200,
+    "vertical": 1938,
+    "none": 942
+  }
+}

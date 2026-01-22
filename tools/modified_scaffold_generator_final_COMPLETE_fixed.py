@@ -183,66 +183,113 @@ class EnhancedScaffoldGeneratorFinal:
         # 🆕 Global missing quota system
         self.missing_quota = 4  # Maximum total missing components
         self.current_missing_count = 0  # Current count of missing components
+        self.current_missing_by_type: Dict[str, int] = defaultdict(int)
         
         self.instance_counter = 1
 
     def reset_missing_quota(self) -> None:
         """Reset missing component counter for new scene generation."""
         self.current_missing_count = 0
+        self.current_missing_by_type = defaultdict(int)
 
     def can_add_missing_component(self) -> bool:
         """Check if we can add another missing component within quota."""
         return self.current_missing_count < self.missing_quota
 
-    def add_missing_component(self) -> bool:
+    def add_missing_component(self, defect_type: Optional[str] = None) -> bool:
         """Try to add a missing component. Returns True if successful."""
         if self.can_add_missing_component():
             self.current_missing_count += 1
+            if defect_type:
+                self.current_missing_by_type[defect_type] += 1
             return True
         return False
 
     def generate_pipe_points(self, start_pos: np.ndarray, end_pos: np.ndarray, diameter: float, num_points: int = 50) -> np.ndarray:
-        """Generate points along a pipe between two positions."""
+        """Generate CONTINUOUS points along a pipe between two positions."""
         direction = end_pos - start_pos
         length = np.linalg.norm(direction)
         if length < 1e-6:
-            return np.array([])
+            return np.array([]).reshape(0, 3)
         
         direction_norm = direction / length
-        points = []
         
-        for i in range(num_points):
-            t = i / (num_points - 1)
+        # 🆕 파이프 길이에 비례하여 점 개수 계산 (1m당 약 100개)
+        num_length_samples = max(int(length * 100), 10)
+        num_circumference = 12  # 원주 방향 점 개수
+        
+        # Create perpendicular vectors (한 번만 계산)
+        if abs(direction_norm[2]) < 0.9:
+            perp1 = np.cross(direction_norm, np.array([0, 0, 1]))
+        else:
+            perp1 = np.cross(direction_norm, np.array([1, 0, 0]))
+        perp1 = perp1 / (np.linalg.norm(perp1) + 1e-12)
+        perp2 = np.cross(direction_norm, perp1)
+        
+        points = []
+        radius = diameter / 2
+        
+        # 🆕 모든 위치에서 점 생성 (if 조건 제거!)
+        for i in range(num_length_samples):
+            t = i / max(num_length_samples - 1, 1)
             center = start_pos + t * direction
             
-            # Add radial variation for pipe thickness
-            if i % 5 == 0:  # Reduce point density
-                for j in range(8):
-                    angle = j * 2 * np.pi / 8
-                    radius = diameter / 2
-                    # Create perpendicular vectors
-                    if abs(direction_norm[2]) < 0.9:
-                        perp1 = np.cross(direction_norm, np.array([0, 0, 1]))
-                    else:
-                        perp1 = np.cross(direction_norm, np.array([1, 0, 0]))
-                    perp1 = perp1 / np.linalg.norm(perp1)
-                    perp2 = np.cross(direction_norm, perp1)
-                    
-                    offset = radius * (np.cos(angle) * perp1 + np.sin(angle) * perp2)
-                    points.append(center + offset)
+            # 원주 방향 점 생성
+            for j in range(num_circumference):
+                angle = j * 2 * np.pi / num_circumference
+                r_variation = radius * (1.0 + np.random.uniform(-0.05, 0.05))
+                offset = r_variation * (np.cos(angle) * perp1 + np.sin(angle) * perp2)
+                length_noise = np.random.uniform(-0.005, 0.005) * direction_norm
+                points.append(center + offset + length_noise)
         
-        return np.array(points)
+        return np.array(points) if points else np.array([]).reshape(0, 3)
 
     def generate_platform_points(self, center: np.ndarray, width: float, length: float, num_points: int = 100) -> np.ndarray:
-        """Generate points for a rectangular platform."""
+        """Generate DENSE points for a rectangular platform with grid + edges."""
+        # 🆕 면적 기반 점 개수 계산 (1m²당 약 500개)
+        area = width * length
+        actual_num_points = max(int(area * 500), num_points)
+        
         points = []
-        for i in range(num_points):
-            x_offset = random.uniform(-width/2, width/2)
-            y_offset = random.uniform(-length/2, length/2)
-            z_offset = random.uniform(-0.02, 0.02)  # Small thickness variation
-            point = center + np.array([x_offset, y_offset, z_offset])
-            points.append(point)
-        return np.array(points)
+        thickness = 0.03  # 발판 두께 3cm
+        
+        # 🆕 그리드 기반 점 생성 (상면)
+        grid_x = max(int(np.sqrt(actual_num_points * width / length)), 5)
+        grid_y = max(int(np.sqrt(actual_num_points * length / width)), 5)
+        
+        for i in range(grid_x):
+            for j in range(grid_y):
+                x_offset = -width/2 + width * (i + np.random.uniform(0.2, 0.8)) / grid_x
+                y_offset = -length/2 + length * (j + np.random.uniform(0.2, 0.8)) / grid_y
+                
+                # 상면
+                z_top = np.random.uniform(-0.002, 0.002)
+                points.append(center + np.array([x_offset, y_offset, z_top]))
+                
+                # 하면 (30% 확률)
+                if np.random.random() < 0.3:
+                    z_bottom = -thickness + np.random.uniform(-0.002, 0.002)
+                    points.append(center + np.array([x_offset, y_offset, z_bottom]))
+        
+        # 🆕 엣지 점 생성 (테두리 강조)
+        num_edge_points = int(2 * (width + length) * 50)  # 1m당 50개
+        for _ in range(num_edge_points):
+            edge = np.random.randint(4)
+            if edge == 0:    # 왼쪽
+                x, y = -width/2, np.random.uniform(-length/2, length/2)
+            elif edge == 1:  # 오른쪽
+                x, y = width/2, np.random.uniform(-length/2, length/2)
+            elif edge == 2:  # 앞
+                x, y = np.random.uniform(-width/2, width/2), -length/2
+            else:            # 뒤
+                x, y = np.random.uniform(-width/2, width/2), length/2
+            
+            x += np.random.uniform(-0.005, 0.005)
+            y += np.random.uniform(-0.005, 0.005)
+            z = np.random.uniform(-thickness, 0)
+            points.append(center + np.array([x, y, z]))
+        
+        return np.array(points) if points else np.array([]).reshape(0, 3)
 
     def calculate_bbox(self, points: np.ndarray) -> np.ndarray:
         """Calculate 3D bounding box from points."""
@@ -289,40 +336,78 @@ class EnhancedScaffoldGeneratorFinal:
         cumulative_heights: List[float],
         config: Dict
     ) -> Tuple[List[ScaffoldComponent], List[str]]:
-        """Create vertical posts with missing detection capability."""
+        """Create vertical posts with missing detection capability (RANDOMIZED)."""
         components: List[ScaffoldComponent] = []
         violations: List[str] = []
 
         safety_status = config.get('safety_status', 'safe')
         base_missing_rate = {'safe': 0.0, 'minor_defect': 0.1, 'major_defect': 0.2}[safety_status]
-        
+
         diameter = ScaffoldSpecs.PIPE_DIAMETERS['vertical']
         max_height = max(cumulative_heights)
 
+        # Step 1: Create ALL vertical posts as normal (no missing yet)
+        all_verticals = []
         for col in range(num_bays + 1):
             for row in range(2):  # Front and back rows
                 x = col * bay_width
                 y = row * depth
-                
-                # 🆕 Check missing quota before creating missing component
-                should_be_missing = (random.random() < base_missing_rate and 
-                                   self.can_add_missing_component())
-                
-                if should_be_missing:
-                    # Create missing marker at mid-height
+
+                start_pos = np.array([x, y, 0])
+                end_pos = np.array([x, y, max_height])
+                points = self.generate_pipe_points(start_pos, end_pos, diameter)
+
+                if len(points) > 0:
+                    bbox = self.calculate_bbox(points)
+                    comp = ScaffoldComponent(
+                        name=f"vertical_post_{self.instance_counter}",
+                        semantic_id=0,
+                        instance_id=self.instance_counter,
+                        points=points,
+                        bbox=bbox,
+                        metadata={'column': col, 'row': row, 'position': (x, y)}
+                    )
+                    all_verticals.append(comp)
+                    self.instance_counter += 1
+
+        # Step 2: RANDOMLY select some to convert to missing markers
+        if base_missing_rate > 0 and len(all_verticals) > 0:
+            # Calculate how many should be missing
+            num_candidates = int(len(all_verticals) * base_missing_rate)
+            # Limit by quota
+            type_quota = config.get('missing_type_quota', {}).get('missing_vertical', self.missing_quota)
+            remaining_type_quota = max(type_quota - self.current_missing_by_type['missing_vertical'], 0)
+            num_to_remove = min(
+                num_candidates,
+                remaining_type_quota,
+                self.missing_quota - self.current_missing_count
+            )
+
+            if num_to_remove > 0:
+                # RANDOMIZE: shuffle and pick first N
+                random.shuffle(all_verticals)
+
+                for i in range(num_to_remove):
+                    comp = all_verticals[i]
+                    col = comp.metadata['column']
+                    row = comp.metadata['row']
+                    x, y = comp.metadata['position']
+
+                    # Convert to missing marker
                     mid_height = max_height / 2
                     marker_points = []
                     for _ in range(10):
                         noise = np.random.normal(0, 0.05, 3)
                         marker_points.append([x, y, mid_height] + noise)
-                    
+
                     marker_points = np.array(marker_points)
                     bbox = self.calculate_bbox(marker_points)
-                    
-                    comp = ScaffoldComponent(
-                        name=f"missing_vertical_{col}_{row}_{self.instance_counter}",
+
+                    # Replace with missing marker
+                    all_verticals[i] = ScaffoldComponent(
+                        name=f"missing_vertical_{col}_{row}_{comp.instance_id}",
                         semantic_id=10,
-                        instance_id=self.instance_counter,
+                        instance_id=comp.instance_id,
                         points=marker_points,
                         bbox=bbox,
                         metadata={
@@ -332,30 +417,10 @@ class EnhancedScaffoldGeneratorFinal:
                             'floor': 'all'
                         }
                     )
-                    components.append(comp)
-                    self.instance_counter += 1
-                    self.add_missing_component()  # 🆕 Increment quota counter
+                    self.add_missing_component('missing_vertical')
                     violations.append(f"Missing vertical post at column {col}, row {row}")
-                    continue
-                
-                # Create normal vertical post
-                start_pos = np.array([x, y, 0])
-                end_pos = np.array([x, y, max_height])
-                points = self.generate_pipe_points(start_pos, end_pos, diameter)
-                
-                if len(points) > 0:
-                    bbox = self.calculate_bbox(points)
-                    comp = ScaffoldComponent(
-                        name=f"vertical_post_{self.instance_counter}",
-                        semantic_id=0,
-                        instance_id=self.instance_counter,
-                        points=points,
-                        bbox=bbox,
-                        metadata={'column': col, 'row': row}
-                    )
-                    components.append(comp)
-                    self.instance_counter += 1
 
+        components.extend(all_verticals)
         return components, violations
 
     def _create_horizontal_beams_with_validation(
@@ -366,14 +431,17 @@ class EnhancedScaffoldGeneratorFinal:
         cumulative_heights: List[float],
         config: Dict
     ) -> Tuple[List[ScaffoldComponent], List[str]]:
-        """Create horizontal beams with missing detection capability."""
+        """Create horizontal beams with missing detection capability (RANDOMIZED)."""
         components: List[ScaffoldComponent] = []
         violations: List[str] = []
 
         safety_status = config.get('safety_status', 'safe')
         base_missing_rate = {'safe': 0.0, 'minor_defect': 0.1, 'major_defect': 0.2}[safety_status]
-        
+
         diameter = ScaffoldSpecs.PIPE_DIAMETERS['horizontal']
+
+        # Step 1: Create ALL horizontal beams as normal (no missing yet)
+        all_horizontals = []
 
         for floor_idx, z in enumerate(cumulative_heights[:-1]):
             # X-direction beams
@@ -381,41 +449,8 @@ class EnhancedScaffoldGeneratorFinal:
                 for side_idx, j in enumerate([0, depth]):
                     start_pos = np.array([bay * bay_width, j, z])
                     end_pos = np.array([(bay + 1) * bay_width, j, z])
-                    
-                    # 🆕 Check missing quota
-                    should_be_missing = (random.random() < base_missing_rate and 
-                                       self.can_add_missing_component())
-                    
-                    if should_be_missing:
-                        mid_pos = (start_pos + end_pos) / 2.0
-                        marker_points = []
-                        for _ in range(10):
-                            noise = np.random.normal(0, 0.05, 3)
-                            marker_points.append(mid_pos + noise)
-                        
-                        marker_points = np.array(marker_points)
-                        bbox = self.calculate_bbox(marker_points)
-                        comp = ScaffoldComponent(
-                            name=f"missing_horizontal_X_{bay}_{side_idx}_{floor_idx}_{self.instance_counter}",
-                            semantic_id=10,
-                            instance_id=self.instance_counter,
-                            points=marker_points,
-                            bbox=bbox,
-                            metadata={
-                                'defect_type': 'missing_horizontal',
-                                'orientation': 'X',
-                                'floor': floor_idx,
-                                'bay': bay,
-                                'side': side_idx,
-                            }
-                        )
-                        components.append(comp)
-                        self.instance_counter += 1
-                        self.add_missing_component()  # 🆕 Increment quota counter
-                        violations.append(f"Missing horizontal beam X at floor {floor_idx}, bay {bay}")
-                        continue
-                    
-                    # Create normal beam
+                    mid_pos = (start_pos + end_pos) / 2.0
+
                     points = self.generate_pipe_points(start_pos, end_pos, diameter)
                     if len(points) > 0:
                         bbox = self.calculate_bbox(points)
@@ -430,50 +465,18 @@ class EnhancedScaffoldGeneratorFinal:
                                 'floor': floor_idx,
                                 'bay': bay,
                                 'side': side_idx,
+                                'mid_pos': mid_pos
                             }
                         )
-                        components.append(comp)
+                        all_horizontals.append(comp)
                         self.instance_counter += 1
 
             # Y-direction beams
             for col in range(num_bays + 1):
                 start_pos = np.array([col * bay_width, 0, z])
                 end_pos = np.array([col * bay_width, depth, z])
-                
-                # 🆕 Check missing quota
-                should_be_missing = (random.random() < base_missing_rate and 
-                                   self.can_add_missing_component())
-                
-                if should_be_missing:
-                    mid_pos = (start_pos + end_pos) / 2.0
-                    marker_points = []
-                    for _ in range(10):
-                        noise = np.random.normal(0, 0.05, 3)
-                        marker_points.append(mid_pos + noise)
-                    
-                    marker_points = np.array(marker_points)
-                    bbox = self.calculate_bbox(marker_points)
-                    comp = ScaffoldComponent(
-                        name=f"missing_horizontal_Y_{col}_{floor_idx}_{self.instance_counter}",
-                        semantic_id=10,
-                        instance_id=self.instance_counter,
-                        points=marker_points,
-                        bbox=bbox,
-                        metadata={
-                            'defect_type': 'missing_horizontal',
-                            'orientation': 'Y',
-                            'floor': floor_idx,
-                            'column': col,
-                            'side': 0,
-                        }
-                    )
-                    components.append(comp)
-                    self.instance_counter += 1
-                    self.add_missing_component()  # 🆕 Increment quota counter
-                    violations.append(f"Missing horizontal beam Y at floor {floor_idx}, column {col}")
-                    continue
-                
-                # Create normal beam
+                mid_pos = (start_pos + end_pos) / 2.0
+
                 points = self.generate_pipe_points(start_pos, end_pos, diameter)
                 if len(points) > 0:
                     bbox = self.calculate_bbox(points)
@@ -488,11 +491,71 @@ class EnhancedScaffoldGeneratorFinal:
                             'floor': floor_idx,
                             'column': col,
                             'side': 0,
+                            'mid_pos': mid_pos
                         }
                     )
-                    components.append(comp)
+                    all_horizontals.append(comp)
                     self.instance_counter += 1
 
+        # Step 2: RANDOMLY select some to convert to missing markers
+        if base_missing_rate > 0 and len(all_horizontals) > 0:
+            num_candidates = int(len(all_horizontals) * base_missing_rate)
+            type_quota = config.get('missing_type_quota', {}).get('missing_horizontal', self.missing_quota)
+            remaining_type_quota = max(type_quota - self.current_missing_by_type['missing_horizontal'], 0)
+            num_to_remove = min(
+                num_candidates,
+                remaining_type_quota,
+                self.missing_quota - self.current_missing_count
+            )
+
+            if num_to_remove > 0:
+                # RANDOMIZE: shuffle and pick first N
+                random.shuffle(all_horizontals)
+
+                for i in range(num_to_remove):
+                    comp = all_horizontals[i]
+                    floor_idx = comp.metadata['floor']
+                    mid_pos = comp.metadata['mid_pos']
+                    orientation = comp.metadata['orientation']
+
+                    # Convert to missing marker
+                    marker_points = []
+                    for _ in range(10):
+                        noise = np.random.normal(0, 0.05, 3)
+                        marker_points.append(mid_pos + noise)
+
+                    marker_points = np.array(marker_points)
+                    bbox = self.calculate_bbox(marker_points)
+
+                    # Build name based on orientation
+                    if orientation == 'X':
+                        bay = comp.metadata['bay']
+                        side_idx = comp.metadata['side']
+                        name = f"missing_horizontal_X_{bay}_{side_idx}_{floor_idx}_{comp.instance_id}"
+                        violation_msg = f"Missing horizontal beam X at floor {floor_idx}, bay {bay}"
+                    else:  # Y
+                        col = comp.metadata['column']
+                        name = f"missing_horizontal_Y_{col}_{floor_idx}_{comp.instance_id}"
+                        violation_msg = f"Missing horizontal beam Y at floor {floor_idx}, column {col}"
+
+                    # Replace with missing marker
+                    all_horizontals[i] = ScaffoldComponent(
+                        name=name,
+                        semantic_id=10,
+                        instance_id=comp.instance_id,
+                        points=marker_points,
+                        bbox=bbox,
+                        metadata={
+                            'defect_type': 'missing_horizontal',
+                            'orientation': orientation,
+                            'floor': floor_idx,
+                            **{k: v for k, v in comp.metadata.items() if k in ['bay', 'column', 'side']}
+                        }
+                    )
+                    self.add_missing_component('missing_horizontal')
+                    violations.append(violation_msg)
+
+        components.extend(all_horizontals)
         return components, violations
 
     def _create_platforms_with_validation(
@@ -503,48 +566,18 @@ class EnhancedScaffoldGeneratorFinal:
         cumulative_heights: List[float],
         config: Dict
     ) -> Tuple[List[ScaffoldComponent], List[str]]:
-        """Create platforms with missing detection capability."""
+        """Create platforms with missing detection capability (RANDOMIZED)."""
         components: List[ScaffoldComponent] = []
         violations: List[str] = []
 
         safety_status = config.get('safety_status', 'safe')
         base_missing_rate = {'safe': 0.0, 'minor_defect': 0.1, 'major_defect': 0.2}[safety_status]
 
+        # Step 1: Create ALL platforms as normal (no missing yet)
+        all_platforms = []
+
         for floor_idx, z in enumerate(cumulative_heights[:-1]):
             for bay in range(num_bays):
-                # 🆕 Check missing quota
-                should_be_missing = (random.random() < base_missing_rate and 
-                                   self.can_add_missing_component())
-                
-                if should_be_missing:
-                    # Missing platform marker
-                    center_x = (bay + 0.5) * bay_width
-                    center_y = depth / 2
-                    
-                    marker_points = []
-                    for _ in range(10):
-                        x = center_x + random.uniform(-0.1, 0.1)
-                        y = center_y + random.uniform(-0.1, 0.1)
-                        marker_points.append([x, y, z])
-
-                    marker_points = np.array(marker_points)
-                    bbox = self.calculate_bbox(marker_points)
-
-                    component = ScaffoldComponent(
-                        name=f"missing_platform_{floor_idx}_{bay}_{self.instance_counter}",
-                        semantic_id=10,
-                        instance_id=self.instance_counter,
-                        points=marker_points,
-                        bbox=bbox,
-                        metadata={'defect_type': 'missing_platform', 'floor': floor_idx, 'bay': bay}
-                    )
-                    components.append(component)
-                    self.instance_counter += 1
-                    self.add_missing_component()  # 🆕 Increment quota counter
-                    violations.append(f"Missing platform at floor {floor_idx}, bay {bay}")
-                    continue
-
-                # Normal platform
                 platform_center = np.array([
                     (bay + 0.5) * bay_width,
                     depth / 2,
@@ -567,11 +600,64 @@ class EnhancedScaffoldGeneratorFinal:
                         instance_id=self.instance_counter,
                         points=platform_points,
                         bbox=bbox,
-                        metadata={'width': platform_width, 'floor': floor_idx, 'bay': bay}
+                        metadata={
+                            'width': platform_width,
+                            'floor': floor_idx,
+                            'bay': bay,
+                            'center': platform_center
+                        }
                     )
-                    components.append(component)
+                    all_platforms.append(component)
                     self.instance_counter += 1
 
+        # Step 2: RANDOMLY select some to convert to missing markers
+        if base_missing_rate > 0 and len(all_platforms) > 0:
+            num_candidates = int(len(all_platforms) * base_missing_rate)
+            type_quota = config.get('missing_type_quota', {}).get('missing_platform', self.missing_quota)
+            remaining_type_quota = max(type_quota - self.current_missing_by_type['missing_platform'], 0)
+            num_to_remove = min(
+                num_candidates,
+                remaining_type_quota,
+                self.missing_quota - self.current_missing_count
+            )
+
+            if num_to_remove > 0:
+                # RANDOMIZE: shuffle and pick first N
+                random.shuffle(all_platforms)
+
+                for i in range(num_to_remove):
+                    comp = all_platforms[i]
+                    floor_idx = comp.metadata['floor']
+                    bay = comp.metadata['bay']
+                    center = comp.metadata['center']
+
+                    # Convert to missing marker
+                    marker_points = []
+                    for _ in range(10):
+                        x = center[0] + random.uniform(-0.1, 0.1)
+                        y = center[1] + random.uniform(-0.1, 0.1)
+                        marker_points.append([x, y, center[2]])
+
+                    marker_points = np.array(marker_points)
+                    bbox = self.calculate_bbox(marker_points)
+
+                    # Replace with missing marker
+                    all_platforms[i] = ScaffoldComponent(
+                        name=f"missing_platform_{floor_idx}_{bay}_{comp.instance_id}",
+                        semantic_id=10,
+                        instance_id=comp.instance_id,
+                        points=marker_points,
+                        bbox=bbox,
+                        metadata={
+                            'defect_type': 'missing_platform',
+                            'floor': floor_idx,
+                            'bay': bay
+                        }
+                    )
+                    self.add_missing_component('missing_platform')
+                    violations.append(f"Missing platform at floor {floor_idx}, bay {bay}")
+
+        components.extend(all_platforms)
         return components, violations
 
     def _create_vertical_ladders(
@@ -775,16 +861,23 @@ class EnhancedScaffoldGeneratorFinal:
         return components, violations
 
     def _format_bbox(self, bbox: Optional[np.ndarray]) -> str:
-        """Format bounding box coordinates for display."""
-        if bbox is None:
+        """Format bounding box coordinates in ShapeLLM standard 8-corner format."""
+        if bbox is None or len(bbox) != 8:
             return "N/A"
-        min_coords = np.min(bbox, axis=0)
-        max_coords = np.max(bbox, axis=0)
-        return f"({min_coords[0]:.3f}, {min_coords[1]:.3f}, {min_coords[2]:.3f}) to ({max_coords[0]:.3f}, {max_coords[1]:.3f}, {max_coords[2]:.3f})"
+        # ShapeLLM standard format: [[x1, y1, z1], [x2, y2, z2], ..., [x8, y8, z8]]
+        corners_list = [[float(f"{corner[0]:.3f}"), float(f"{corner[1]:.3f}"), float(f"{corner[2]:.3f}")]
+                        for corner in bbox]
+        return str(corners_list)
 
     def generate_shapellm_annotations(self, scene_id: str, components: List[ScaffoldComponent], config: Dict) -> List[Dict]:
-        """Generate comprehensive missing detection annotations."""
+        """Generate comprehensive missing detection annotations with Template-Guided Reasoning (Idea 1)."""
         annotations: List[Dict] = []
+
+        # Get scaffold configuration for labeling
+        num_bays = config.get('num_bays', 3)
+        num_floors = config.get('num_floors', 4)
+        num_rows = 2  # Always 2 rows (front and back)
+        scaffold_spec = f"{num_bays}-bay, {num_rows}-row, {num_floors}-floor scaffold"
 
         # Separate components by type
         missing_comps = [c for c in components if c.semantic_id == 10]
@@ -795,6 +888,21 @@ class EnhancedScaffoldGeneratorFinal:
         present_verticals = [c for c in components if c.semantic_id == 0]
         present_horizontals = [c for c in components if c.semantic_id == 1]
         present_platforms = [c for c in components if c.semantic_id == 3]
+
+        # ✅ CORRECTED: Expected = Present + Missing (complete structure before missing)
+        # This ensures logical consistency: Expected >= Actual
+        expected_verticals = len(present_verticals) + len(missing_verticals)
+        expected_horizontals = len(present_horizontals) + len(missing_horizontals)
+        expected_platforms = len(present_platforms) + len(missing_platforms)
+
+        # Actual counts (present components only)
+        actual_verticals = len(present_verticals)
+        actual_horizontals = len(present_horizontals)
+        actual_platforms = len(present_platforms)
+
+        # Expected vs Actual summary text
+        expected_text = f"Expected structure: {scaffold_spec} has {expected_verticals} vertical posts, {expected_horizontals} horizontal beams, {expected_platforms} platforms."
+        actual_text = f"Actual: {actual_verticals} vertical posts, {actual_horizontals} horizontal beams, {actual_platforms} platforms."
 
         # 1. Overall summary question
         if missing_comps:
@@ -823,11 +931,11 @@ class EnhancedScaffoldGeneratorFinal:
                 'conversations': [
                     {
                         'from': 'human',
-                        'value': '<point>\nAre there any missing components? If so, provide their locations.'
+                        'value': f'<point>\nThis is a {scaffold_spec}. Are there any missing components? If so, provide their locations.'
                     },
                     {
                         'from': 'gpt',
-                        'value': f"Yes, {len(missing_comps)} components are missing:\n" + '\n'.join(missing_info)
+                        'value': f"{expected_text}\n{actual_text}\nMissing: {len(missing_comps)} components are missing:\n" + '\n'.join(missing_info)
                     }
                 ],
                 'task_type': 'missing_detection_summary',
@@ -968,11 +1076,11 @@ class EnhancedScaffoldGeneratorFinal:
                 'conversations': [
                     {
                         'from': 'human',
-                        'value': '<point>\nAre there any missing components?'
+                        'value': f'<point>\nThis is a {scaffold_spec}. Are there any missing components?'
                     },
                     {
                         'from': 'gpt',
-                        'value': 'No, all scaffold components are properly installed.'
+                        'value': f'{expected_text}\n{actual_text}\nNo missing components detected. All scaffold components are properly installed.'
                     }
                 ],
                 'task_type': 'missing_detection_none',
@@ -994,11 +1102,11 @@ class EnhancedScaffoldGeneratorFinal:
                 'conversations': [
                     {
                         'from': 'human',
-                        'value': '<point>\nAre there any missing vertical posts?'
+                        'value': f'<point>\nThis {scaffold_spec} should have {expected_verticals} vertical posts. Are there any missing vertical posts?'
                     },
                     {
                         'from': 'gpt',
-                        'value': f"Yes, {len(missing_verticals)} vertical posts are missing:\n" + '\n'.join(vertical_info)
+                        'value': f"Expected: {expected_verticals} vertical posts.\nActual: {actual_verticals} vertical posts.\nMissing: {len(missing_verticals)} vertical posts are missing:\n" + '\n'.join(vertical_info)
                     }
                 ],
                 'task_type': 'missing_detection_vertical_summary',
@@ -1048,11 +1156,11 @@ class EnhancedScaffoldGeneratorFinal:
                 'conversations': [
                     {
                         'from': 'human',
-                        'value': '<point>\nAre there any missing horizontal beams?'
+                        'value': f'<point>\nThis {scaffold_spec} should have {expected_horizontals} horizontal beams. Are there any missing horizontal beams?'
                     },
                     {
                         'from': 'gpt',
-                        'value': f"Yes, {len(missing_horizontals)} horizontal beams are missing:\n" + '\n'.join(horizontal_info)
+                        'value': f"Expected: {expected_horizontals} horizontal beams.\nActual: {actual_horizontals} horizontal beams.\nMissing: {len(missing_horizontals)} horizontal beams are missing:\n" + '\n'.join(horizontal_info)
                     }
                 ],
                 'task_type': 'missing_detection_horizontal_summary',
@@ -1155,14 +1263,26 @@ class EnhancedScaffoldGeneratorFinal:
         self.instance_counter = 1
 
         # Scene configuration
+        safety_status = random.choices(
+            ['safe', 'minor_defect', 'major_defect'],
+            weights=[0.4, 0.3, 0.3]
+        )[0]
+
         config = {
             'num_bays': random.randint(2, 4),
             'bay_width': random.uniform(1.5, 2.0),
             'depth': random.uniform(1.2, 1.8),
             'num_floors': random.randint(2, 4),
             'floor_height': random.uniform(1.8, 2.2),
-            'safety_status': random.choice(['safe', 'minor_defect', 'major_defect'])
+            'safety_status': safety_status
         }
+
+        if safety_status != 'safe':
+            config['missing_type_quota'] = {
+                'missing_vertical': 1,
+                'missing_horizontal': 2,
+                'missing_platform': 1
+            }
 
         num_bays = config['num_bays']
         bay_width = config['bay_width']
@@ -1268,8 +1388,8 @@ class EnhancedScaffoldGeneratorFinal:
         scale = float(max_distance + 1e-12)
         coord_scaled = coord_centered / scale
 
-        # Step 3: Random rotation
-        Rz_deg = float(np.random.uniform(-10.0, 10.0))
+        # Step 3: Random rotation (Z-axis, ±45 degrees for better viewpoint diversity)
+        Rz_deg = float(np.random.uniform(-45.0, 45.0))
         theta = np.radians(Rz_deg)
         cos_t, sin_t = np.cos(theta), np.sin(theta)
         R = np.array([[cos_t, -sin_t, 0], [sin_t, cos_t, 0], [0, 0, 1]], dtype=np.float32)

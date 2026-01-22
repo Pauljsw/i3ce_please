@@ -3,7 +3,7 @@
 LLM_VERSION=qizekun/ShapeLLM_7B_gapartnet_v1.0
 MODEL_VERSION=shapellm-7bs-scaffold
 PRETRAIN_TAG=gapartnet-v1.0
-TAG=lorascaffold-i3ce_251120_2041
+TAG=lorascaffold-i3ce_260121_1800
 
 type=scaffold_i3ce2
 
@@ -16,9 +16,10 @@ elif [ $type = "gapartnet" ]; then
 elif [ $type = "test" ]; then
     meta_path="./playground/data/mini_test/mini_test.json"
     pcs_path="./playground/data/mini_test/pcs"
-elif [ $type = "scaffold_i3ce2" ]; then  # ← 추가
-    meta_path="./playground/data/shapellm/scaffold_missing/scaffold_missing_sft.json"
-    pcs_path="./playground/data/shapellm/scaffold_missing/pcs"
+elif [ $type = "scaffold_i3ce2" ]; then
+    # Idea 1: Template-Guided Reasoning dataset
+    meta_path="./playground/data/shapellm/scaffold_missing_complete/scaffold_missing_sft.json"
+    pcs_path="./playground/data/shapellm/scaffold_missing_complete/pcs"
 else
     echo "Unknown type"
     exit 1
@@ -28,7 +29,7 @@ deepspeed llava/train/train_mem.py \
     --lora_enable True --lora_r 128 --lora_alpha 256 --mm_projector_lr 2e-5 \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path $LLM_VERSION \
-    --version v1 \
+    --version scaffold_missing_260121 \
     --data_path $meta_path \
     --point_folder $pcs_path \
     --vision_tower ReConV2/cfgs/pretrain/large/openshape.yaml \
@@ -46,7 +47,7 @@ deepspeed llava/train/train_mem.py \
     --mm_use_pt_patch_token False \
     --bf16 True \
     --output_dir ./checkpoints/$MODEL_VERSION-$type-$TAG \
-    --num_train_epochs 2 \
+    --num_train_epochs 1 \
     --per_device_train_batch_size 4 \
     --per_device_eval_batch_size 4 \
     --gradient_accumulation_steps 4 \
